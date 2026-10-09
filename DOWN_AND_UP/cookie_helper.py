@@ -72,7 +72,7 @@ def get_cookie_file_for_url(url, user_id, download_dir=None):
     for index, cookie_url in enumerate(cookie_urls, start=1):
         try:
             ok, _status, data, _error = _download_content(
-                cookie_url, timeout=15, user_id=user_id
+                cookie_url, timeout=30, user_id=user_id
             )
             if not ok or not data or len(data) > 100 * 1024:
                 continue
