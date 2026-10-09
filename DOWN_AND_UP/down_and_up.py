@@ -691,7 +691,7 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
 
         anim_thread = start_hourglass_animation(user_id, hourglass_msg_id, stop_anim)
 
-        # Get info_dict to estimate the size of the selected quality
+        # Selected format metadata is filled from the later format lookup.
         selected_format = None
 
         current_total_process = ""
