@@ -1124,7 +1124,7 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
                         fmt for fmt in available_formats
                         if fmt.get("vcodec") and not fmt.get("vcodec", "").startswith("images")
                     ]
-                    formats_text = "\\n".join(
+                    formats_text = "\n".join(
                         f"• {fmt.get('vcodec', 'unknown')} {fmt.get('height', 'unknown')}p"
                         for fmt in video_formats[:5]
                     ) or "• No video formats available"
