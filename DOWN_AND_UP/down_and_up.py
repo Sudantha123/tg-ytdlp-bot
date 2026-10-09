@@ -16,10 +16,10 @@ from HELPERS.app_instance import get_app
 from HELPERS.logger import logger, send_to_logger, send_to_user, send_to_all, send_error_to_user, get_log_channel, log_error_to_channel
 from CONFIG.logger_msg import LoggerMsg
 from CONFIG.messages import Messages, safe_get_messages
-from HELPERS.limitter import TimeFormatter, humanbytes, check_user, check_file_size_limit, check_subs_limits
+from HELPERS.limitter import TimeFormatter, humanbytes, check_user, check_subs_limits
 from HELPERS.download_status import set_active_download, clear_download_start_time, check_download_timeout, start_hourglass_animation, start_cycle_progress, playlist_errors_lock, playlist_errors
 from HELPERS.safe_messeger import safe_delete_messages, safe_edit_message_text, safe_forward_messages
-from HELPERS.filesystem_hlp import sanitize_filename, sanitize_filename_strict, cleanup_user_temp_files, cleanup_subtitle_files, create_directory, check_disk_space
+from HELPERS.filesystem_hlp import sanitize_filename, sanitize_filename_strict, cleanup_user_temp_files, cleanup_subtitle_files
 from DOWN_AND_UP.ffmpeg import get_duration_thumb, get_video_info_ffprobe, embed_subs_to_video, create_default_thumbnail, split_video_2
 from DOWN_AND_UP.sender import send_videos
 from DATABASE.firebase_init import write_logs
@@ -562,51 +562,6 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
         hourglass_msg_id = None
         anim_thread = start_hourglass_animation(user_id, hourglass_msg_id, stop_anim)
 
-        # Check if there's enough disk space (estimate 2GB per video)
-        user_dir_name = os.path.abspath(os.path.join("users", str(user_id)))
-        create_directory(user_dir_name)
-
-        # Estimate required space: first use yt-dlp exact/approx size,
-        # then estimate via bitrate and duration; as a last resort assume 2 GB.
-        required_bytes = 2 * 1024 * 1024 * 1024
-        try:
-            # Try to use cached info first for size check
-            if cached_video_info:
-                info_probe = cached_video_info
-                logger.info(f"✅ [OPTIMIZATION] Using cached video info for size check")
-            else:
-                from DOWN_AND_UP.yt_dlp_hook import get_video_formats
-                info_probe = get_video_formats(url, user_id, cookies_already_checked=cookies_already_checked)
-                logger.info(f"⚠️ [OPTIMIZATION] Had to fetch video info for size check")
-            size = 0
-            if isinstance(info_probe, dict):
-                size = info_probe.get('filesize') or info_probe.get('filesize_approx') or 0
-                if not size:
-                    # fallback via tbr*duration
-                    tbr = info_probe.get('tbr') or 0  # total bitrate in Kbps
-                    duration = info_probe.get('duration') or 0
-                    if tbr and duration:
-                        # tbr Kbps -> bytes/sec: tbr*1000/8, *duration
-                        size = int((float(tbr) * 1000.0 / 8.0) * float(duration))
-                    else:
-                        # last resort: take the maximum tbr across formats
-                        formats = info_probe.get('formats') or []
-                        best_tbr = 0
-                        for f in formats:
-                            ftbr = f.get('tbr') or 0
-                            if ftbr and ftbr > best_tbr:
-                                best_tbr = ftbr
-                        if best_tbr and duration:
-                            size = int((float(best_tbr) * 1000.0 / 8.0) * float(duration))
-            if size and size > 0:
-                required_bytes = int(size * 1.2)  # 20% buffer
-        except Exception:
-            pass
-
-        if not check_disk_space(user_dir_name, required_bytes):
-            send_to_user(message, safe_get_messages(user_id).ERROR_NO_DISK_SPACE_MSG)
-            return
-
         # Create user directory (subscription already checked in video_extractor)
         user_dir = os.path.join("users", str(user_id))
         if not os.path.exists(user_dir):
@@ -736,120 +691,8 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
 
         anim_thread = start_hourglass_animation(user_id, hourglass_msg_id, stop_anim)
 
-        # Get info_dict to estimate the size of the selected quality
-        try:
-            ydl_opts = {
-                'quiet': True,
-                'extractor_args': {
-                    'youtubetab': {'skip': ['authcheck']}
-                }
-            }
-            # Try to use cookies from download directory first, then fallback to user root
-            download_cookie_path = os.path.join(user_dir_name, "cookie.txt")
-            user_cookie_path = os.path.join("users", str(user_id), "cookie.txt")
-            
-            if os.path.exists(download_cookie_path):
-                ydl_opts['cookiefile'] = download_cookie_path
-                logger.info(f"Using cookies from download directory: {download_cookie_path}")
-            elif os.path.exists(user_cookie_path):
-                ydl_opts['cookiefile'] = user_cookie_path
-                logger.info(f"Using cookies from user directory: {user_cookie_path}")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                pre_info = ydl.extract_info(url, download=False)
-            # Normalize to dict and check None
-            if isinstance(pre_info, list):
-                pre_info = (pre_info[0] if len(pre_info) > 0 else {})
-            elif isinstance(pre_info, dict) and 'entries' in pre_info and isinstance(pre_info['entries'], list) and pre_info['entries']:
-                pre_info = pre_info['entries'][0]
-            if pre_info is None:
-                logger.warning("pre_info is None, skipping size check")
-                pre_info = {}
-        except Exception as e:
-            logger.warning(f"Failed to extract info for size check: {e}")
-            pre_info = {}
-
-        # Find format for selected safe_quality_key
+        # Selected format metadata is filled from the later format lookup.
         selected_format = None
-        for f in pre_info.get('formats', []):
-            w = f.get('width')
-            h = f.get('height')
-            if w and h:
-                qk = get_quality_by_min_side(w, h)
-                if str(qk) == str(safe_quality_key):
-                    selected_format = f
-                    break
-
-        # If you did not find the format, STOP downloading!
-        #if not selected_format:
-            #logger.warning(f"[SIZE CHECK] Could not determine format for quality_key={quality_key}. Download will not start.")
-            #app.send_message(
-                #user_id,
-                #"Unable to determine the file size for the selected quality. Please try another quality or check your cookies.",
-                #reply_to_message_id=message.id
-            #)
-            #return
-
-        
-        # Checking the limit
-        #from _config import Config
-        BYTES_IN_GIB = 1024 ** 3
-        max_size_gb = getattr(Config, 'MAX_FILE_SIZE', 10)
-        max_size_bytes = int(max_size_gb * BYTES_IN_GIB)
-        # Get the file size
-        if selected_format is None:
-            logger.warning("selected_format is None, skipping size check")
-            filesize = 0
-            allowed = True  # Allow download if we can't determine the size
-        else:
-            filesize = selected_format.get('filesize') or selected_format.get('filesize_approx')
-            if filesize is None:
-                # fallback on rating
-                tbr = selected_format.get('tbr')
-                duration = selected_format.get('duration')
-                if tbr is not None and duration is not None:
-                    try:
-                        filesize = float(tbr) * float(duration) * 125
-                    except (TypeError, ValueError):
-                        filesize = None
-                else:
-                    filesize = None
-                
-                if filesize is None:
-                    width = selected_format.get('width')
-                    height = selected_format.get('height')
-                    duration = selected_format.get('duration')
-                    if width is not None and height is not None and duration is not None:
-                        try:
-                            filesize = int(width) * int(height) * float(duration) * 0.07
-                        except (TypeError, ValueError):
-                            filesize = 0
-                    else:
-                        filesize = 0
-
-            allowed = check_file_size_limit(selected_format, max_size_bytes=max_size_bytes, message=message)
-        
-        # Secure file size logging
-        try:
-            filesize_val = float(filesize) if filesize is not None else 0
-            if filesize_val > 0:
-                size_gb = filesize_val/(1024**3)
-                logger.info(f"[SIZE CHECK] safe_quality_key={safe_quality_key}, determined size={size_gb:.2f} GB, limit={max_size_gb} GB, allowed={allowed}")
-            else:
-                logger.info(f"[SIZE CHECK] safe_quality_key={safe_quality_key}, size unknown, limit={max_size_gb} GB, allowed={allowed}")
-        except (TypeError, ValueError):
-            logger.info(f"[SIZE CHECK] safe_quality_key={safe_quality_key}, size unknown, limit={max_size_gb} GB, allowed={allowed}")
-
-        if not allowed:
-            app.send_message(
-                user_id,
-                safe_get_messages(user_id).ERROR_FILE_SIZE_LIMIT_MSG.format(limit=max_size_gb),
-                reply_parameters=ReplyParameters(message_id=message.id)
-            )
-            log_error_to_channel(message, safe_get_messages(user_id).SIZE_LIMIT_EXCEEDED.format(max_size_gb=max_size_gb), url)
-            logger.warning(f"[SIZE CHECK] Download for safe_quality_key={safe_quality_key} was blocked due to size limit.")
-            return
-        else:
-            logger.info(f"[SIZE CHECK] Download for safe_quality_key={safe_quality_key} is allowed and will proceed.")
 
         current_total_process = ""
         last_update = 0
@@ -1006,7 +849,7 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
 
         def try_download(url, attempt_opts):
             messages = safe_get_messages(message.chat.id)
-            nonlocal current_total_process, error_message, did_cookie_retry, did_proxy_retry, is_hls, error_message_sent, is_reverse_order, use_range_download, current_playlist_items_override, range_entries_metadata
+            nonlocal current_total_process, error_message, did_cookie_retry, did_proxy_retry, is_hls, error_message_sent, is_reverse_order, use_range_download, current_playlist_items_override, range_entries_metadata, selected_format
             
             # Use original filename for first attempt
             original_outtmpl = os.path.join(user_dir_name, "%(title)s.%(ext)s")
@@ -1130,125 +973,12 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
             # Log final yt-dlp options for debugging
             log_ytdlp_options(user_id, common_opts, "video_download")
             
-            # Check if we need to use --no-cookies for this domain
-            if is_no_cookie_domain(url):
-                common_opts['cookiefile'] = None  # Equivalent to --no-cookies
-                logger.info(f"Using --no-cookies for domain: {url}")
+            from DOWN_AND_UP.cookie_helper import get_cookie_file_for_url
+            common_opts['cookiefile'] = get_cookie_file_for_url(url, user_id, user_dir_name)
+            if common_opts['cookiefile']:
+                logger.info("Using available cookie file for download")
             else:
-                # Check if cookie.txt exists in download directory first, then user's folder
-                download_cookie_path = os.path.join(user_dir_name, "cookie.txt")
-                user_cookie_path = os.path.join("users", str(user_id), "cookie.txt")
-                
-                # For YouTube URLs, use optimized cookie logic - check existing first on user's URL, then retry if needed
-                if is_youtube_url(url):
-                    from COMMANDS.cookies_cmd import get_youtube_cookie_urls, test_youtube_cookies_on_url, _download_content
-                    
-                    # Always check existing cookies first on user's URL for maximum speed
-                    if os.path.exists(user_cookie_path):
-                        logger.info(f"Checking existing YouTube cookies on user's URL for user {user_id}")
-                        if test_youtube_cookies_on_url(user_cookie_path, url, user_id):
-                            common_opts['cookiefile'] = user_cookie_path
-                            logger.info(f"Existing YouTube cookies work on user's URL for user {user_id} - using them")
-                        else:
-                            logger.info(f"Existing YouTube cookies failed on user's URL, trying to get new ones for user {user_id}")
-                            cookie_urls = get_youtube_cookie_urls()
-                            if cookie_urls:
-                                # Use only unchecked sources for this user
-                                from COMMANDS.cookies_cmd import get_unchecked_cookie_sources, mark_cookie_source_checked
-                                unchecked_indices = get_unchecked_cookie_sources(user_id, cookie_urls)
-                                if not unchecked_indices:
-                                    logger.warning(f"All cookie sources have been checked for user {user_id}, no more sources to try")
-                                    common_opts['cookiefile'] = None
-                                else:
-                                    success = False
-                                    for i, idx in enumerate(unchecked_indices, 1):
-                                        cookie_url = cookie_urls[idx]
-                                        logger.info(f"Trying YouTube cookie source {idx + 1}/{len(cookie_urls)} for user {user_id}")
-                                        
-                                        # Mark this source as checked
-                                        mark_cookie_source_checked(user_id, idx)
-                                        
-                                        try:
-                                            ok, status, content, err = _download_content(cookie_url, timeout=30, user_id=user_id)
-                                            if ok and content and len(content) <= 100 * 1024:
-                                                with open(user_cookie_path, "wb") as cf:
-                                                    cf.write(content)
-                                                if test_youtube_cookies_on_url(user_cookie_path, url, user_id):
-                                                    common_opts['cookiefile'] = user_cookie_path
-                                                    logger.info(f"YouTube cookies from source {idx + 1} work on user's URL for user {user_id} - saved to user folder")
-                                                    success = True
-                                                    break
-                                                else:
-                                                    if os.path.exists(user_cookie_path):
-                                                        os.remove(user_cookie_path)
-                                        except Exception as e:
-                                            logger.error(f"Error processing YouTube cookie source {idx + 1} for user {user_id}: {e}")
-                                            continue
-                                    if not success:
-                                        common_opts['cookiefile'] = None
-                                        logger.warning(f"All YouTube cookie sources failed for user {user_id}, will try without cookies")
-                            else:
-                                common_opts['cookiefile'] = None
-                                logger.warning(f"No YouTube cookie sources configured for user {user_id}, will try without cookies")
-                    else:
-                        logger.info(f"No YouTube cookies found for user {user_id}, attempting to get new ones")
-                        cookie_urls = get_youtube_cookie_urls()
-                        if cookie_urls:
-                            # Use only unchecked sources for this user
-                            from COMMANDS.cookies_cmd import get_unchecked_cookie_sources, mark_cookie_source_checked
-                            unchecked_indices = get_unchecked_cookie_sources(user_id, cookie_urls)
-                            if not unchecked_indices:
-                                logger.warning(f"All cookie sources have been checked for user {user_id}, no more sources to try")
-                                common_opts['cookiefile'] = None
-                            else:
-                                success = False
-                                for i, idx in enumerate(unchecked_indices, 1):
-                                    cookie_url = cookie_urls[idx]
-                                    logger.info(f"Trying YouTube cookie source {idx + 1}/{len(cookie_urls)} for user {user_id}")
-                                    
-                                    # Mark this source as checked
-                                    mark_cookie_source_checked(user_id, idx)
-                                    
-                                    try:
-                                        ok, status, content, err = _download_content(cookie_url, timeout=30, user_id=user_id)
-                                        if ok and content and len(content) <= 100 * 1024:
-                                            with open(user_cookie_path, "wb") as cf:
-                                                cf.write(content)
-                                            if test_youtube_cookies_on_url(user_cookie_path, url, user_id):
-                                                common_opts['cookiefile'] = user_cookie_path
-                                                logger.info(f"YouTube cookies from source {idx + 1} work on user's URL for user {user_id} - saved to user folder")
-                                                success = True
-                                                break
-                                            else:
-                                                if os.path.exists(user_cookie_path):
-                                                    os.remove(user_cookie_path)
-                                    except Exception as e:
-                                        logger.error(f"Error processing YouTube cookie source {idx + 1} for user {user_id}: {e}")
-                                        continue
-                                if not success:
-                                    common_opts['cookiefile'] = None
-                                    logger.warning(f"All YouTube cookie sources failed for user {user_id}, will try without cookies")
-                        else:
-                            common_opts['cookiefile'] = None
-                            logger.warning(f"No YouTube cookie sources configured for user {user_id}, will try without cookies")
-                else:
-                    # For non-YouTube URLs, use new cookie fallback system
-                    from COMMANDS.cookies_cmd import get_cookie_cache_result, try_non_youtube_cookie_fallback
-                    cache_result = get_cookie_cache_result(user_id, url)
-                    
-                    if cache_result and cache_result['result']:
-                        # Use cached successful cookies
-                        common_opts['cookiefile'] = cache_result['cookie_path']
-                        logger.info(f"Using cached cookies for non-YouTube URL: {url}")
-                    else:
-                        # Try user cookies first
-                        if os.path.exists(user_cookie_path):
-                            common_opts['cookiefile'] = user_cookie_path
-                            logger.info(f"Using user cookies for non-YouTube URL: {url}")
-                        else:
-                            # No user cookies, will try fallback during download
-                            common_opts['cookiefile'] = None
-                            logger.info(f"No user cookies found for non-YouTube URL: {url}, will try fallback during download")
+                logger.info("No cookie file selected; continuing without cookies")
             
             # If this is not a playlist with a range, add --no-playlist to the URL with the list parameter
             if not is_playlist and 'list=' in url:
@@ -1320,109 +1050,13 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
             # Add PO token provider for YouTube domains
             ytdl_opts = add_pot_to_ytdl_opts(ytdl_opts, url)
             
-            # If MKV is ON, remux to mkv; else to mp4
-            if mkv_on:
-                ytdl_opts['remux_video'] = 'mkv'
-            else:
-                ytdl_opts['remux_video'] = 'mp4'
+            # Do not force a remux pass; keep yt-dlp's downloaded/merged container.
             try:
                 logger.info(f"Starting yt-dlp extraction for URL: {url}")
                 logger.info(f"yt-dlp options: {ytdl_opts}")
                 
-                # First, check if the requested format is available using cached info or get_video_formats
-                check_info = None
-                if cached_video_info:
-                    check_info = cached_video_info
-                    logger.info("✅ [OPTIMIZATION] Using cached video info for format check")
-                else:
-                    from DOWN_AND_UP.yt_dlp_hook import get_video_formats
-                    logger.info("Checking available formats...")
-                    check_info = get_video_formats(url, user_id, cookies_already_checked=cookies_already_checked, use_proxy=use_proxy)
-                    logger.info("Format check completed")
-                
-                # Check if requested format exists
-                requested_format = attempt_opts.get('format', '')
-                if requested_format and requested_format != 'best':
-                    available_formats = check_info.get('formats', [])
-                    format_found = False
-                    
-                    # Check if requested format is available
-                    if requested_format.startswith('id:'):
-                        # Check for specific format ID
-                        requested_id = requested_format.split(':', 1)[1]
-                        for fmt in available_formats:
-                            if fmt.get('format_id') == requested_id:
-                                format_found = True
-                                logger.info(f"Format ID {requested_id} found: {fmt.get('ext', 'unknown')} {fmt.get('resolution', 'unknown')}")
-                                break
-                        
-                        if not format_found:
-                            logger.warning(f"Format ID {requested_id} not found for this video")
-                            # Notify user and stop download
-                            try:
-                                available_ids = [fmt.get('format_id', 'unknown') for fmt in available_formats[:10]]
-                                logger.info(f"Available format IDs: {available_ids}")
-                                send_error_to_user(
-                                    message,
-                                    safe_get_messages(user_id).FORMAT_ID_NOT_FOUND_MSG.format(format_id=requested_id, available_ids=', '.join(available_ids[:10])) +
-                                    f"Use /list command to see all available formats."
-                                )
-                                return None
-                            except Exception as e:
-                                logger.error(f"Error sending format not found message: {e}")
-                            return None
-                    elif 'av01' in requested_format:
-                        # Check for AV1 format specifically
-                        for fmt in available_formats:
-                            vcodec = fmt.get('vcodec')
-                            if vcodec and vcodec.startswith('av01'):
-                                format_found = True
-                                break
-                        
-                        if not format_found:
-                            logger.warning(f"AV1 format requested but not available for this video")
-                            
-                            # Also check if there are any video formats at all
-                            video_formats = [fmt for fmt in available_formats if fmt.get('vcodec') and not fmt.get('vcodec').startswith('images')]
-                            if not video_formats:
-                                logger.warning(f"No video formats available at all for this video")
-                            # Notify user and stop download
-                            try:
-                                # Filter out non-video formats (like storyboards)
-                                video_formats = [fmt for fmt in available_formats if fmt.get('vcodec') and not fmt.get('vcodec').startswith('images')]
-                                
-                                available_formats_list = []
-                                for fmt in video_formats[:5]:
-                                    vcodec = fmt.get('vcodec', 'unknown')
-                                    height = fmt.get('height', 'unknown')
-                                    if vcodec and vcodec != 'unknown':
-                                        available_formats_list.append(f"• {vcodec} {height}p")
-                                
-                                formats_text = "\n".join(available_formats_list) if available_formats_list else "• No video formats available"
-                                
-                                safe_edit_message_text(user_id, proc_msg_id, 
-                                    f"{current_total_process}\n{safe_get_messages(user_id).DOWN_UP_AV1_NOT_AVAILABLE_MSG.format(formats_text=formats_text)}")
-                            except Exception as e:
-                                logger.error(f"Failed to notify user about format unavailability: {e}")
-                            
-                            # Send error message to user
-                            # Filter out non-video formats (like storyboards)
-                            video_formats = [fmt for fmt in available_formats if fmt.get('vcodec') and not fmt.get('vcodec').startswith('images')]
-                            
-                            available_formats_list = []
-                            for fmt in video_formats[:5]:
-                                vcodec = fmt.get('vcodec', 'unknown')
-                                height = fmt.get('height', 'unknown')
-                                if vcodec and vcodec != 'unknown':
-                                    available_formats_list.append(f"• {vcodec} {height}p")
-                            
-                            formats_text = "\n".join(available_formats_list) if available_formats_list else "• No video formats available"
-                            
-                            send_to_user(message, 
-                                safe_get_messages(user_id).AV1_FORMAT_NOT_AVAILABLE_MSG.format(formats_text=formats_text) +
-                                safe_get_messages(user_id).AV1_NOT_AVAILABLE_FORMAT_SELECT_MSG)
-                            
-                            return None
+                # Reuse the single metadata extraction below; do not fetch formats twice.
+                selected_format = None
                 
                 # Try with proxy fallback if user proxy is enabled
                 def extract_info_operation(opts):
@@ -1458,6 +1092,16 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
                     else:
                         # If there is only one video in the playlist, just download it
                         info_dict = entries[0]  # Just take the first video
+
+                # Use the extracted metadata for progress updates, avoiding a second format lookup.
+                selected_format = None
+                if isinstance(info_dict, dict):
+                    for fmt in (info_dict.get("formats") or []):
+                        width = fmt.get("width")
+                        height = fmt.get("height")
+                        if width and height and str(get_quality_by_min_side(width, height)) == str(safe_quality_key):
+                            selected_format = fmt
+                            break
 
                 # Check if this is a live stream and handle it if detection is disabled
                 if info_dict and isinstance(info_dict, dict) and info_dict.get('is_live', False):
@@ -2316,78 +1960,10 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
                     caption_name = original_video_title  # Original title for caption
 
             user_vid_path = os.path.join(dir_path, final_name)
+            # Preserve the original stream/container. Do not re-encode just to force MP4.
+            # Non-MP4 formats are uploaded as documents by sender.py.
             if final_name.lower().endswith((".webm", ".ts")):
-                try:
-                    safe_edit_message_text(user_id, proc_msg_id,
-                        f"{info_text}\n{full_bar}   100.0%\nConverting video using ffmpeg... ⏳")
-                except Exception as e:
-                    logger.error(f"Error updating status before conversion: {e}")
-
-                mp4_basename = sanitize_filename_strict(os.path.splitext(final_name)[0]) + ".mp4"
-                mp4_file = os.path.join(dir_path, mp4_basename)
-
-                # Get FFmpeg path using the common function
-                from DOWN_AND_UP.ffmpeg import get_ffmpeg_path
-                ffmpeg_path = get_ffmpeg_path()
-                if not ffmpeg_path:
-                    send_error_to_user(message, safe_get_messages(user_id).FFMPEG_NOT_FOUND_MSG)
-                    break
-                
-                ffmpeg_cmd = [
-                    ffmpeg_path,
-                    "-y",
-                    "-i", user_vid_path,
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "23",
-                    "-c:a", "aac",
-                    "-b:a", "128k",
-                    mp4_file
-                ]
-                try:
-                    result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
-                    os.remove(user_vid_path)
-                    user_vid_path = mp4_file
-                    final_name = mp4_basename
-                except subprocess.CalledProcessError as e:
-                    error_details = f"Return code: {e.returncode}"
-                    if e.stderr:
-                        error_details += f"\nError output: {e.stderr[:500]}"
-                    if e.stdout:
-                        error_details += f"\nStandard output: {e.stdout[:500]}"
-                    
-                    # Check for specific FFmpeg errors
-                    if "Invalid argument" in str(e.stderr):
-                        error_message = safe_get_messages(user_id).DOWN_UP_VIDEO_CONVERSION_FAILED_INVALID_MSG
-                        error_message += (
-                            "**Possible causes:**\n"
-                            "• Unsupported video codec or format\n"
-                            "• Corrupted source file\n"
-                            "• Incompatible video parameters\n"
-                            "• Insufficient system resources\n\n"
-                            "**Solutions:**\n"
-                            "• Try downloading with a different quality\n"
-                            "• Check if the source video is corrupted\n"
-                            "• Try a different video source if available\n"
-                            "• The original file will be sent without conversion\n\n"
-                            f"**Technical details:** {error_details}"
-                        )
-                    else:
-                        error_message = safe_get_messages(user_id).DOWN_UP_VIDEO_CONVERSION_FAILED_MSG
-                        error_message += (
-                            "**Solutions:**\n"
-                            "• Try downloading with a different quality\n"
-                            "• The original file will be sent without conversion\n"
-                            "• If the problem persists, try a different video source\n\n"
-                            f"**Technical details:** {error_details}"
-                        )
-                    
-                    send_error_to_user(message, error_message)
-                    logger.error(f"FFmpeg conversion failed: {error_details}")
-                    break
-                except Exception as e:
-                    send_error_to_user(message, safe_get_messages(user_id).CONVERSION_TO_MP4_FAILED_MSG.format(error=e))
-                    break
+                logger.info("Keeping original media container; re-encoding is disabled")
 
             after_rename_abs_path = os.path.abspath(user_vid_path)
             # --- YouTube thumbnail logic (priority over ffmpeg) ---
