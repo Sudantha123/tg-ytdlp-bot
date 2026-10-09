@@ -674,199 +674,82 @@ def embed_subs_to_video(video_path, user_id, tg_update_callback=None, app=None, 
             logger.info("Soft subtitle mux into MKV completed successfully")
             return True
 
-        # Get video parameters via ffprobe (hard burn-in for MP4 and other containers)
-        width, height, total_time = get_video_info_ffprobe(video_path)
-        if width == 0 or height == 0:
-            logger.error(f"Unable to determine video resolution via ffprobe: width={width}, height={height}")
-            return False
-        original_size = os.path.getsize(video_path)
-
-        # Checking the duration of the video
-        if total_time and total_time > Config.MAX_SUB_DURATION:
-            logger.info(f"Video duration too long for subtitles: {total_time} sec")
+        # Fast soft-mux for MP4: copy video/audio streams and add an MP4 text track.
+        # Never burn subtitles into pixels, because that forces a full video re-encode.
+        if not video_path.lower().endswith((".mp4", ".m4v")):
+            logger.info("Skipping subtitle mux for this container to avoid video re-encoding")
             return False
 
-        # Checking the file size
-        original_size_mb = original_size / (1024 * 1024)
-        if original_size_mb and original_size_mb > Config.MAX_SUB_SIZE:
-            logger.info(f"Video file too large for subtitles: {original_size_mb:.2f} MB")
-            return False
-
-        # Video quality testing on the smallest side
-        # Logue video parameters before checking quality
-        logger.info(f"Quality check: width={width}, height={height}, min_side={min(width, height)}, limit={Config.MAX_SUB_QUALITY}")
-        if min(width, height) > Config.MAX_SUB_QUALITY:
-            logger.info(f"Video quality too high for subtitles: {width}x{height}, min side: {min(width, height)}p > {Config.MAX_SUB_QUALITY}p")
-            return False
-
-        # --- Simplified search: take any .SRT file in the folder ---
-        srt_files = [f for f in os.listdir(video_dir) if f.lower().endswith('.srt')]
+        srt_files = [name for name in os.listdir(video_dir) if name.lower().endswith(".srt")]
         if not srt_files:
             logger.info(f"No .srt files found in {video_dir}")
             return False
-        
-        subs_path = os.path.join(video_dir, srt_files[0])
-        if not os.path.exists(subs_path):
-            logger.error(f"Subtitle file not found: {subs_path}")
-            return False
 
-        # Always bring .SRT to UTF-8
-        subs_path = ensure_utf8_srt(subs_path)
+        subs_path = ensure_utf8_srt(os.path.join(video_dir, srt_files[0]))
         if not subs_path or not os.path.exists(subs_path) or os.path.getsize(subs_path) == 0:
-            logger.error(f"Subtitle file after ensure_utf8_srt is missing or empty: {subs_path}")
+            logger.error("Subtitle file is missing or empty after UTF-8 normalization")
             return False
 
-        # Forcibly correcting Arab cracies
-        if subs_lang in {'ar', 'fa', 'ur', 'ps', 'iw', 'he'}:
+        if subs_lang in {"ar", "fa", "ur", "ps", "iw", "he"}:
             subs_path = force_fix_arabic_encoding(subs_path, subs_lang)
         if not subs_path or not os.path.exists(subs_path) or os.path.getsize(subs_path) == 0:
-            logger.error(f"Subtitle file after force_fix_arabic_encoding is missing or empty: {subs_path}")
+            logger.error("Subtitle file is missing or empty after language normalization")
             return False
-        
+
+        ffmpeg_path = get_ffmpeg_path()
+        if not ffmpeg_path:
+            logger.error("FFmpeg not found; skipping soft subtitle mux")
+            return False
+
         video_base = os.path.splitext(os.path.basename(video_path))[0]
         output_path = os.path.join(video_dir, f"{video_base}_with_subs_temp.mp4")
-        
-        # We get the duration of the video via FFPRobe
-        def get_duration(path):
-            messages = safe_get_messages(user_id)
-            try:
-                import json
-                result = subprocess.run([
-                    'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-                    '-of', 'json', path
-                ], capture_output=True, text=True)
-                if result.returncode == 0:
-                    data = json.loads(result.stdout)
-                    return float(data['format']['duration'])
-            except Exception as e:
-                logger.error(f"ffprobe error: {e}")
-            return None
-        
-        # Field of subtitles with improved styling - using Arial Black font and black 75% background
-        subs_path_escaped = subs_path.replace("'", "'\\''")
-        # Use Arial Black font with black 75% background and white text
-        filter_arg = f"subtitles='{subs_path_escaped}':force_style='FontName=Arial Black,FontSize=16,PrimaryColour=&Hffffff,OutlineColour=&H000000,BackColour=&H80000000,Outline=2,Shadow=1,MarginV=25'"
         cmd = [
-            'ffmpeg',
-            '-y',
-            '-i', video_path,
-            '-vf', filter_arg,
-            '-c:a', 'copy',
-            output_path
+            ffmpeg_path, "-y",
+            "-i", video_path,
+            "-i", subs_path,
+            "-map", "0",
+            "-map", "1:0",
+            "-c", "copy",
+            "-c:s", "mov_text",
+            "-metadata:s:s:0", f"language={subs_lang}",
+            output_path,
         ]
-        
-        logger.info(f"Running ffmpeg command: {' '.join(cmd)}")
-        
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1
-        )
-        progress = 0.0
-        last_update = time.time()
-        eta = "?"
-        time_pattern = re.compile(r'time=([0-9:.]+)')
-        
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            logger.info(line.strip())
-            match = time_pattern.search(line)
-            if match and total_time:
-                t = match.group(1)
-                # Transform T (hh: mm: ss.xx) in seconds
-                h, m, s = 0, 0, 0.0
-                parts = t.split(':')
-                if len(parts) == 3:
-                    h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
-                elif len(parts) == 2:
-                    m, s = int(parts[0]), float(parts[1])
-                elif len(parts) == 1:
-                    s = float(parts[0])
-                cur_sec = h * 3600 + m * 60 + s
-                progress = min(cur_sec / total_time, 1.0)
-                # ETA
-                if progress and progress > 0:
-                    elapsed = time.time() - last_update
-                    eta_sec = int((1.0 - progress) * (elapsed / progress)) if progress and progress > 0 else 0
-                    eta = f"{eta_sec//60}:{eta_sec%60:02d}"
-                # Update every 10 seconds or with a change in progress> 1%
-                if tg_update_callback and (time.time() - last_update > 10 or progress >= 1.0):
-                    tg_update_callback(progress, eta)
-                    last_update = time.time()
-        
-        proc.wait()
-        
-        if proc.returncode != 0:
-            # Try to read any remaining output for error details
-            remaining_output = proc.stdout.read() if proc.stdout else ""
-            error_details = remaining_output[:500] if remaining_output else "No error details available"
-            
-            logger.error(f"FFmpeg error: process exited with code {proc.returncode}")
-            logger.error(f"FFmpeg error details: {error_details}")
-            
-            # Try to identify common error types
-            error_lower = error_details.lower()
-            if "invalid argument" in error_lower or "invalid data" in error_lower:
-                logger.error("FFmpeg error: Invalid argument or data - video/subtitle format may be incompatible")
-            elif "no such file" in error_lower or "cannot find" in error_lower:
-                logger.error("FFmpeg error: File not found - check if video or subtitle file exists")
-            elif "permission denied" in error_lower:
-                logger.error("FFmpeg error: Permission denied - check file permissions")
-            elif "codec" in error_lower and ("not found" in error_lower or "unsupported" in error_lower):
-                logger.error("FFmpeg error: Codec not found or unsupported")
-            elif "out of memory" in error_lower or "cannot allocate" in error_lower:
-                logger.error("FFmpeg error: Out of memory - video may be too large")
-            
-            if os.path.exists(output_path):
-                os.remove(output_path)
+
+        try:
+            subprocess.run(
+                cmd, check=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace"
+            )
+        except subprocess.CalledProcessError as exc:
+            logger.warning("Soft subtitle mux failed; keeping the original video: %s", (exc.stderr or str(exc))[:500])
+            try:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+            except OSError:
+                pass
             return False
-        
-        # Check that the file exists and is not empty
-        if not os.path.exists(output_path):
-            logger.error("Output file does not exist after ffmpeg")
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            logger.error("Soft subtitle mux produced no output; keeping the original video")
             return False
-        
-        # We are waiting a little so that the file will definitely complete the recording
-        time.sleep(1)
-        
-        output_size = os.path.getsize(output_path)
-        original_size = os.path.getsize(video_path)
-        
-        if output_size == 0:
-            logger.error("Output file is empty")
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            return False
-        
-        # We check that the final file is not too small (there should be at least 50% of the original)
-        if output_size and output_size < original_size * 0.5:
-            logger.error(f"Output file too small: {output_size} bytes (original: {original_size} bytes)")
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            return False
-        
-        # Safely replace the file
+
         backup_path = video_path + ".backup"
         try:
-            os.rename(video_path, backup_path)   # Create a backup
-            os.rename(output_path, video_path)   # Rename the result
-            os.remove(backup_path)               # Delete backup
-        except Exception as e:
-            logger.error(f"Error replacing video file: {e}")
-            # Restore the source file
-            if os.path.exists(backup_path):
-                os.rename(backup_path, video_path)
-            if os.path.exists(output_path):
-                os.remove(output_path)
+            os.replace(video_path, backup_path)
+            os.replace(output_path, video_path)
+            os.remove(backup_path)
+        except Exception as exc:
+            logger.error("Could not replace video after soft subtitle mux: %s", exc)
+            try:
+                if os.path.exists(backup_path) and not os.path.exists(video_path):
+                    os.replace(backup_path, video_path)
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+            except OSError:
+                pass
             return False
-        
-        # Send .SRT to the user before removing
+
+        # Keep the project's existing behavior of delivering the standalone SRT.
         if os.path.exists(subs_path):
             try:
                 if app is not None and message is not None:
@@ -874,22 +757,22 @@ def embed_subs_to_video(video_path, user_id, tg_update_callback=None, app=None, 
                         chat_id=user_id,
                         document=subs_path,
                         caption="<blockquote>💬 Subtitles SRT-file</blockquote>",
-                        reply_parameters=enums.ReplyParameters(message_id=message.id) if hasattr(enums, 'ReplyParameters') else None,
-                        parse_mode=enums.ParseMode.HTML
+                        reply_parameters=enums.ReplyParameters(message_id=message.id) if hasattr(enums, "ReplyParameters") else None,
+                        parse_mode=enums.ParseMode.HTML,
                     )
                     from HELPERS.logger import get_log_channel
                     safe_forward_messages(get_log_channel("video"), user_id, [sent_msg.id])
-                    send_to_logger(message, safe_get_messages(user_id).SUBS_SENT_MSG) 
-            except Exception as e:
-                logger.error(f"Error sending srt file: {e}")
+                    send_to_logger(message, safe_get_messages(user_id).SUBS_SENT_MSG)
+            except Exception as exc:
+                logger.error("Error sending SRT file: %s", exc)
             try:
                 os.remove(subs_path)
-            except Exception as e:
-                logger.error(f"Error deleting srt file: {e}")
-        
-        logger.info("Successfully burned-in subtitles")
+            except OSError:
+                pass
+
+        logger.info("Soft subtitle mux completed without video re-encoding")
         return True
-        
+
     except Exception as e:
         logger.error(f"Error in embed_subs_to_video: {str(e)}")
         import traceback
