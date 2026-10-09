@@ -93,18 +93,19 @@ def get_video_formats(url, user_id=None, playlist_start_index=1, cookies_already
         # Log final yt-dlp options for debugging
         log_ytdlp_options(user_id, ytdl_opts, "get_video_formats")
     
-    from DOWN_AND_UP.cookie_helper import get_cookie_file_for_url
-    cookie_file = get_cookie_file_for_url(url, user_id) if user_id is not None else None
+    if user_id is not None:
+        from DOWN_AND_UP.cookie_helper import get_cookie_file_for_url
+        cookie_file = get_cookie_file_for_url(url, user_id)
 
-    # No-cookie domains always override any local cookie file.
-    if is_no_cookie_domain(url):
-        ytdl_opts['cookiefile'] = None
-        logger.info(safe_get_messages(user_id).YTDLP_USING_NO_COOKIES_FOR_DOMAIN_MSG.format(url=url))
-    elif cookie_file:
-        ytdl_opts['cookiefile'] = cookie_file
-        logger.info("[YTDLP DEBUG] Using available cookie file for format extraction")
-    else:
-        logger.info("[YTDLP DEBUG] No cookie file available for format extraction")
+        # No-cookie domains always override any local cookie file.
+        if is_no_cookie_domain(url):
+            ytdl_opts['cookiefile'] = None
+            logger.info(safe_get_messages(user_id).YTDLP_USING_NO_COOKIES_FOR_DOMAIN_MSG.format(url=url))
+        elif cookie_file:
+            ytdl_opts['cookiefile'] = cookie_file
+            logger.info("[YTDLP DEBUG] Using available cookie file for format extraction")
+        else:
+            logger.info("[YTDLP DEBUG] No cookie file available for format extraction")
 
         # Add proxy configuration if needed for this domain 
         if use_proxy:
