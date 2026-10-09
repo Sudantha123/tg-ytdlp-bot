@@ -1093,15 +1093,56 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
                         # If there is only one video in the playlist, just download it
                         info_dict = entries[0]  # Just take the first video
 
-                # Use the extracted metadata for progress updates, avoiding a second format lookup.
+                # Reuse the extracted metadata for format checks and progress updates.
+                # This keeps the format selector's validation without another network request.
+                format_info = info_dict
+                if isinstance(info_dict, dict) and info_dict.get("entries"):
+                    format_info = next(
+                        (entry for entry in info_dict.get("entries", []) if isinstance(entry, dict)),
+                        info_dict,
+                    )
+                available_formats = format_info.get("formats", []) if isinstance(format_info, dict) else []
+                requested_format = str(attempt_opts.get("format") or "")
+
+                if requested_format.startswith("id:"):
+                    requested_id = requested_format.split(":", 1)[1]
+                    if not any(fmt.get("format_id") == requested_id for fmt in available_formats):
+                        available_ids = [fmt.get("format_id", "unknown") for fmt in available_formats[:10]]
+                        send_error_to_user(
+                            message,
+                            safe_get_messages(user_id).FORMAT_ID_NOT_FOUND_MSG.format(
+                                format_id=requested_id,
+                                available_ids=", ".join(available_ids),
+                            ) + "Use /list command to see all available formats.",
+                        )
+                        return None
+
+                if "av01" in requested_format and not any(
+                    (fmt.get("vcodec") or "").startswith("av01") for fmt in available_formats
+                ):
+                    video_formats = [
+                        fmt for fmt in available_formats
+                        if fmt.get("vcodec") and not fmt.get("vcodec", "").startswith("images")
+                    ]
+                    formats_text = "\\n".join(
+                        f"• {fmt.get('vcodec', 'unknown')} {fmt.get('height', 'unknown')}p"
+                        for fmt in video_formats[:5]
+                    ) or "• No video formats available"
+                    send_to_user(
+                        message,
+                        safe_get_messages(user_id).AV1_FORMAT_NOT_AVAILABLE_MSG.format(
+                            formats_text=formats_text
+                        ) + safe_get_messages(user_id).AV1_NOT_AVAILABLE_FORMAT_SELECT_MSG,
+                    )
+                    return None
+
                 selected_format = None
-                if isinstance(info_dict, dict):
-                    for fmt in (info_dict.get("formats") or []):
-                        width = fmt.get("width")
-                        height = fmt.get("height")
-                        if width and height and str(get_quality_by_min_side(width, height)) == str(safe_quality_key):
-                            selected_format = fmt
-                            break
+                for fmt in available_formats:
+                    width = fmt.get("width")
+                    height = fmt.get("height")
+                    if width and height and str(get_quality_by_min_side(width, height)) == str(safe_quality_key):
+                        selected_format = fmt
+                        break
 
                 # Check if this is a live stream and handle it if detection is disabled
                 if info_dict and isinstance(info_dict, dict) and info_dict.get('is_live', False):
