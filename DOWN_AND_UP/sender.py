@@ -64,6 +64,10 @@ def send_videos(
     # Check if user has send_as_file enabled
     user_args = get_user_args(user_id)
     send_as_file = user_args.get("send_as_file", False)
+    # Preserve downloaded codecs/containers: only MP4/M4V are sent as Telegram videos.
+    # Other formats are sent as documents rather than being transcoded just for upload.
+    if not video_abs_path.lower().endswith((".mp4", ".m4v")):
+        send_as_file = True
 
     # --- Define the size of the preview/video ---
     width = None
