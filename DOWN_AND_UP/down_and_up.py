@@ -1055,112 +1055,8 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
                 logger.info(f"Starting yt-dlp extraction for URL: {url}")
                 logger.info(f"yt-dlp options: {ytdl_opts}")
                 
-                # First, check if the requested format is available using cached info or get_video_formats
-                check_info = None
-                if cached_video_info:
-                    check_info = cached_video_info
-                    logger.info("✅ [OPTIMIZATION] Using cached video info for format check")
-                else:
-                    from DOWN_AND_UP.yt_dlp_hook import get_video_formats
-                    logger.info("Checking available formats...")
-                    check_info = get_video_formats(url, user_id, cookies_already_checked=cookies_already_checked, use_proxy=use_proxy)
-                    logger.info("Format check completed")
-                
-                # Reuse the already-fetched format list for progress metadata.
+                # Reuse the single metadata extraction below; do not fetch formats twice.
                 selected_format = None
-                if isinstance(check_info, dict):
-                    for fmt in (check_info.get('formats') or []):
-                        width = fmt.get('width')
-                        height = fmt.get('height')
-                        if width and height:
-                            fmt_quality = get_quality_by_min_side(width, height)
-                            if str(fmt_quality) == str(safe_quality_key):
-                                selected_format = fmt
-                                break
-
-                # Check if requested format exists
-                requested_format = attempt_opts.get('format', '')
-                if requested_format and requested_format != 'best':
-                    available_formats = check_info.get('formats', [])
-                    format_found = False
-                    
-                    # Check if requested format is available
-                    if requested_format.startswith('id:'):
-                        # Check for specific format ID
-                        requested_id = requested_format.split(':', 1)[1]
-                        for fmt in available_formats:
-                            if fmt.get('format_id') == requested_id:
-                                format_found = True
-                                logger.info(f"Format ID {requested_id} found: {fmt.get('ext', 'unknown')} {fmt.get('resolution', 'unknown')}")
-                                break
-                        
-                        if not format_found:
-                            logger.warning(f"Format ID {requested_id} not found for this video")
-                            # Notify user and stop download
-                            try:
-                                available_ids = [fmt.get('format_id', 'unknown') for fmt in available_formats[:10]]
-                                logger.info(f"Available format IDs: {available_ids}")
-                                send_error_to_user(
-                                    message,
-                                    safe_get_messages(user_id).FORMAT_ID_NOT_FOUND_MSG.format(format_id=requested_id, available_ids=', '.join(available_ids[:10])) +
-                                    f"Use /list command to see all available formats."
-                                )
-                                return None
-                            except Exception as e:
-                                logger.error(f"Error sending format not found message: {e}")
-                            return None
-                    elif 'av01' in requested_format:
-                        # Check for AV1 format specifically
-                        for fmt in available_formats:
-                            vcodec = fmt.get('vcodec')
-                            if vcodec and vcodec.startswith('av01'):
-                                format_found = True
-                                break
-                        
-                        if not format_found:
-                            logger.warning(f"AV1 format requested but not available for this video")
-                            
-                            # Also check if there are any video formats at all
-                            video_formats = [fmt for fmt in available_formats if fmt.get('vcodec') and not fmt.get('vcodec').startswith('images')]
-                            if not video_formats:
-                                logger.warning(f"No video formats available at all for this video")
-                            # Notify user and stop download
-                            try:
-                                # Filter out non-video formats (like storyboards)
-                                video_formats = [fmt for fmt in available_formats if fmt.get('vcodec') and not fmt.get('vcodec').startswith('images')]
-                                
-                                available_formats_list = []
-                                for fmt in video_formats[:5]:
-                                    vcodec = fmt.get('vcodec', 'unknown')
-                                    height = fmt.get('height', 'unknown')
-                                    if vcodec and vcodec != 'unknown':
-                                        available_formats_list.append(f"• {vcodec} {height}p")
-                                
-                                formats_text = "\n".join(available_formats_list) if available_formats_list else "• No video formats available"
-                                
-                                safe_edit_message_text(user_id, proc_msg_id, 
-                                    f"{current_total_process}\n{safe_get_messages(user_id).DOWN_UP_AV1_NOT_AVAILABLE_MSG.format(formats_text=formats_text)}")
-                            except Exception as e:
-                                logger.error(f"Failed to notify user about format unavailability: {e}")
-                            
-                            # Send error message to user
-                            # Filter out non-video formats (like storyboards)
-                            video_formats = [fmt for fmt in available_formats if fmt.get('vcodec') and not fmt.get('vcodec').startswith('images')]
-                            
-                            available_formats_list = []
-                            for fmt in video_formats[:5]:
-                                vcodec = fmt.get('vcodec', 'unknown')
-                                height = fmt.get('height', 'unknown')
-                                if vcodec and vcodec != 'unknown':
-                                    available_formats_list.append(f"• {vcodec} {height}p")
-                            
-                            formats_text = "\n".join(available_formats_list) if available_formats_list else "• No video formats available"
-                            
-                            send_to_user(message, 
-                                safe_get_messages(user_id).AV1_FORMAT_NOT_AVAILABLE_MSG.format(formats_text=formats_text) +
-                                safe_get_messages(user_id).AV1_NOT_AVAILABLE_FORMAT_SELECT_MSG)
-                            
-                            return None
                 
                 # Try with proxy fallback if user proxy is enabled
                 def extract_info_operation(opts):
@@ -1196,6 +1092,16 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
                     else:
                         # If there is only one video in the playlist, just download it
                         info_dict = entries[0]  # Just take the first video
+
+                # Use the extracted metadata for progress updates, avoiding a second format lookup.
+                selected_format = None
+                if isinstance(info_dict, dict):
+                    for fmt in (info_dict.get("formats") or []):
+                        width = fmt.get("width")
+                        height = fmt.get("height")
+                        if width and height and str(get_quality_by_min_side(width, height)) == str(safe_quality_key):
+                            selected_format = fmt
+                            break
 
                 # Check if this is a live stream and handle it if detection is disabled
                 if info_dict and isinstance(info_dict, dict) and info_dict.get('is_live', False):
