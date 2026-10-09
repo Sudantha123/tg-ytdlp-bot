@@ -2054,78 +2054,10 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
                     caption_name = original_video_title  # Original title for caption
 
             user_vid_path = os.path.join(dir_path, final_name)
+            # Preserve the original stream/container. Do not re-encode just to force MP4.
+            # Non-MP4 formats are uploaded as documents by sender.py.
             if final_name.lower().endswith((".webm", ".ts")):
-                try:
-                    safe_edit_message_text(user_id, proc_msg_id,
-                        f"{info_text}\n{full_bar}   100.0%\nConverting video using ffmpeg... ⏳")
-                except Exception as e:
-                    logger.error(f"Error updating status before conversion: {e}")
-
-                mp4_basename = sanitize_filename_strict(os.path.splitext(final_name)[0]) + ".mp4"
-                mp4_file = os.path.join(dir_path, mp4_basename)
-
-                # Get FFmpeg path using the common function
-                from DOWN_AND_UP.ffmpeg import get_ffmpeg_path
-                ffmpeg_path = get_ffmpeg_path()
-                if not ffmpeg_path:
-                    send_error_to_user(message, safe_get_messages(user_id).FFMPEG_NOT_FOUND_MSG)
-                    break
-                
-                ffmpeg_cmd = [
-                    ffmpeg_path,
-                    "-y",
-                    "-i", user_vid_path,
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "23",
-                    "-c:a", "aac",
-                    "-b:a", "128k",
-                    mp4_file
-                ]
-                try:
-                    result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
-                    os.remove(user_vid_path)
-                    user_vid_path = mp4_file
-                    final_name = mp4_basename
-                except subprocess.CalledProcessError as e:
-                    error_details = f"Return code: {e.returncode}"
-                    if e.stderr:
-                        error_details += f"\nError output: {e.stderr[:500]}"
-                    if e.stdout:
-                        error_details += f"\nStandard output: {e.stdout[:500]}"
-                    
-                    # Check for specific FFmpeg errors
-                    if "Invalid argument" in str(e.stderr):
-                        error_message = safe_get_messages(user_id).DOWN_UP_VIDEO_CONVERSION_FAILED_INVALID_MSG
-                        error_message += (
-                            "**Possible causes:**\n"
-                            "• Unsupported video codec or format\n"
-                            "• Corrupted source file\n"
-                            "• Incompatible video parameters\n"
-                            "• Insufficient system resources\n\n"
-                            "**Solutions:**\n"
-                            "• Try downloading with a different quality\n"
-                            "• Check if the source video is corrupted\n"
-                            "• Try a different video source if available\n"
-                            "• The original file will be sent without conversion\n\n"
-                            f"**Technical details:** {error_details}"
-                        )
-                    else:
-                        error_message = safe_get_messages(user_id).DOWN_UP_VIDEO_CONVERSION_FAILED_MSG
-                        error_message += (
-                            "**Solutions:**\n"
-                            "• Try downloading with a different quality\n"
-                            "• The original file will be sent without conversion\n"
-                            "• If the problem persists, try a different video source\n\n"
-                            f"**Technical details:** {error_details}"
-                        )
-                    
-                    send_error_to_user(message, error_message)
-                    logger.error(f"FFmpeg conversion failed: {error_details}")
-                    break
-                except Exception as e:
-                    send_error_to_user(message, safe_get_messages(user_id).CONVERSION_TO_MP4_FAILED_MSG.format(error=e))
-                    break
+                logger.info("Keeping original media container; re-encoding is disabled")
 
             after_rename_abs_path = os.path.abspath(user_vid_path)
             # --- YouTube thumbnail logic (priority over ffmpeg) ---
