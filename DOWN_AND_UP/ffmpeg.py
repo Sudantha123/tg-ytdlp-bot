@@ -11,10 +11,8 @@ from moviepy.editor import VideoFileClip
 from moviepy.video.fx.all import resize
 from HELPERS.app_instance import get_app
 from HELPERS.logger import logger, send_to_all, send_to_logger
-from CONFIG.config import Config
-from CONFIG.messages import Messages, safe_get_messages
+from CONFIG.messages import safe_get_messages
 from HELPERS.safe_messeger import safe_forward_messages
-from COMMANDS.format_cmd import get_user_mkv_preference
 from pyrogram import enums
 
 # Get app instance for decorators
@@ -597,14 +595,10 @@ def embed_subs_to_video(video_path, user_id, tg_update_callback=None, app=None, 
         
         video_dir = os.path.dirname(video_path)
         
-        # If container is MKV, do a soft subtitle mux (no burn-in)
-        try:
-            mkv_selected = bool(get_user_mkv_preference(user_id))
-        except Exception:
-            mkv_selected = False
-        is_mkv_file = video_path.lower().endswith('.mkv')
+        # MKV files can carry soft subtitles without re-encoding.
+        is_mkv_file = video_path.lower().endswith(".mkv")
 
-        if is_mkv_file or mkv_selected:
+        if is_mkv_file:
             # Ensure we have an SRT (in UTF-8)
             srt_files = [f for f in os.listdir(video_dir) if f.lower().endswith('.srt')]
             if not srt_files:
