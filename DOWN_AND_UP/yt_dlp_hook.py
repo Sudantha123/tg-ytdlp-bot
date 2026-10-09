@@ -1,6 +1,7 @@
 # --- receiving formats and metadata via yt-dlp ---
 import os
 import yt_dlp
+from CONFIG.config import Config
 from CONFIG.messages import safe_get_messages
 from HELPERS.logger import logger, send_error_to_user
 from URL_PARSERS.nocookie import is_no_cookie_domain
