@@ -849,7 +849,7 @@ def down_and_up(app, message, url, playlist_name, video_count, video_start_with,
 
         def try_download(url, attempt_opts):
             messages = safe_get_messages(message.chat.id)
-            nonlocal current_total_process, error_message, did_cookie_retry, did_proxy_retry, is_hls, error_message_sent, is_reverse_order, use_range_download, current_playlist_items_override, range_entries_metadata
+            nonlocal current_total_process, error_message, did_cookie_retry, did_proxy_retry, is_hls, error_message_sent, is_reverse_order, use_range_download, current_playlist_items_override, range_entries_metadata, selected_format
             
             # Use original filename for first attempt
             original_outtmpl = os.path.join(user_dir_name, "%(title)s.%(ext)s")
