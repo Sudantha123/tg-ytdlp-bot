@@ -1,10 +1,8 @@
 # --- receiving formats and metadata via yt-dlp ---
 import os
 import yt_dlp
-from CONFIG.config import Config
-from CONFIG.messages import Messages, safe_get_messages
+from CONFIG.messages import safe_get_messages
 from HELPERS.logger import logger, send_error_to_user
-from HELPERS.filesystem_hlp import create_directory
 from URL_PARSERS.nocookie import is_no_cookie_domain
 from URL_PARSERS.youtube import is_youtube_url
 from URL_PARSERS.filter_check import is_no_filter_domain
@@ -22,12 +20,6 @@ def get_video_formats(url, user_id=None, playlist_start_index=1, cookies_already
     logger.info(f"   playlist_end_index: {playlist_end_index}")
     logger.info(f"   cookies_already_checked: {cookies_already_checked}")
     logger.info(f"   use_proxy: {use_proxy}")
-    
-    # Reset the "checked cookie sources" cache for a new task
-    if user_id is not None:
-        from COMMANDS.cookies_cmd import reset_checked_cookie_sources
-        reset_checked_cookie_sources(user_id)
-        logger.info(f"🔄 [DEBUG] Reset checked cookie sources for new task for user {user_id}")
     
     messages = safe_get_messages(user_id)
     
