@@ -1,0 +1,85 @@
+name: Deploy tg-ytdlp-bot to VPS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tg-ytdlp-bot-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy over SSH
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate deployment secrets
+        env:
+          VPS_SSH_HOST: ${{ secrets.VPS_SSH_HOST }}
+          VPS_SSH_USER: ${{ secrets.VPS_SSH_USER }}
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          for name in VPS_SSH_HOST VPS_SSH_USER VPS_SSH_PRIVATE_KEY VPS_KNOWN_HOSTS VPS_DEPLOY_PATH; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing repository secret: $name"
+              exit 1
+            fi
+          done
+
+      - name: Deploy latest main branch on VPS
+        env:
+          VPS_SSH_HOST: ${{ secrets.VPS_SSH_HOST }}
+          VPS_SSH_USER: ${{ secrets.VPS_SSH_USER }}
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+          PORT="${VPS_SSH_PORT:-22}"
+          ssh -i ~/.ssh/deploy_key \
+            -p "$PORT" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
+            "$VPS_SSH_USER@$VPS_SSH_HOST" \
+            "DEPLOY_PATH='$VPS_DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+
+          if [ ! -d .git ]; then
+            echo "Deployment path is not a Git checkout: $DEPLOY_PATH"
+            exit 1
+          fi
+          if [ ! -f CONFIG/config.py ]; then
+            echo "Missing CONFIG/config.py. Configure it on the VPS before deploying."
+            exit 1
+          fi
+          if [ ! -f .env ]; then
+            echo "Missing .env. Copy .env.example to .env on the VPS before deploying."
+            exit 1
+          fi
+
+          git fetch --prune origin main
+          git reset --hard origin/main
+
+          docker compose up -d --build --remove-orphans
+          docker compose ps
+          REMOTE
+
+      - name: Remove temporary SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
