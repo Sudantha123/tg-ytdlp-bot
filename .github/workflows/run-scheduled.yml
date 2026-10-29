@@ -1,0 +1,64 @@
+name: Run tg-ytdlp-bot (scheduled runner)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Start every 6 hours; scheduled runs can be delayed by GitHub.
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tg-ytdlp-bot-runner
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 359
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare configuration
+        env:
+          CONFIG_PY: ${{ secrets.CONFIG_PY }}
+          COOKIE_TXT: ${{ secrets.COOKIE_TXT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CONFIG_PY:-}" ]; then
+            echo "::error::Add repository secret CONFIG_PY containing the complete CONFIG/config.py content."
+            exit 1
+          fi
+
+          mkdir -p CONFIG docker/configuration-webserver/site/cookies
+          printf '%s\n' "$CONFIG_PY" > CONFIG/config.py
+          cp .env.example .env
+          sed -i 's/^TZ=.*/TZ=Asia\/Colombo/' .env
+
+          if [ -n "${COOKIE_TXT:-}" ]; then
+            printf '%s\n' "$COOKIE_TXT" > docker/configuration-webserver/site/cookies/youtube.txt
+          fi
+
+      - name: Build and start bot services
+        run: |
+          set -euo pipefail
+          docker compose up -d --build
+          docker compose ps
+          docker compose logs --tail=80 app
+
+      - name: Keep services running for 5 hours 50 minutes
+        run: |
+          # GitHub-hosted runners are ephemeral; this does not make the service
+          # a guaranteed 24/7 host. The next scheduled run is nominally at +6h.
+          sleep 21000
+
+      - name: Show final logs
+        if: always()
+        run: docker compose logs --tail=150 app || true
+
+      - name: Stop containers and clean up
+        if: always()
+        run: docker compose down --remove-orphans || true
